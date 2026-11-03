@@ -2,7 +2,7 @@
 // @id              windows-hello-auto-ok
 // @name            Windows Hello Auto OK
 // @description     Language-independent confirmation of ready Windows Hello biometric dialogs across applications.
-// @version         0.1.0
+// @version         0.1.2
 // @author          Contributors
 // @include         windhawk.exe
 // @architecture    x86
@@ -18,10 +18,15 @@
 Confirms the ready OK button in standard Windows Hello biometric dialogs,
 regardless of the requesting application or interface language.
 
+![Animated preview](https://raw.githubusercontent.com/hermanzamula/windhawk-windows-hello-auto-ok/main/docs/preview.gif)
+
+*Illustrated demo using an English interface and the display name User.*
+
 Detection uses AutomationId, control types, visibility and enabled state.
 It never matches captions, translated messages, account names or websites.
-Only a foreground window owned by the native Windows CredentialUIBroker is
-considered. Visible credential input fields prevent automatic confirmation.
+Visible dialogs owned by the Windows CredentialUIBroker are monitored directly,
+even when another application has focus. Visible credential input fields prevent
+automatic confirmation.
 
 The mod runs in an isolated Windhawk tool process. Windows requires elevated
 access to credential UI, so enabling the mod may display a UAC consent prompt.
@@ -51,6 +56,7 @@ to the system UI may require an update.
 #include <shellapi.h>
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -90,14 +96,40 @@ bool HasCredentialInput(const std::vector<Node>& nodes) {
     });
 }
 
+// Accepts either the expanded credential list or its collapsed sign-in-options link.
+bool HasCredentialSelector(const std::vector<Node>& nodes) {
+    return CountControls(nodes, L"CredentialsListV2", UIA_ListControlTypeId) +
+           CountControls(nodes, L"ChooseAnotherOption", UIA_HyperlinkControlTypeId) == 1;
+}
+
 // Requires the standard biometric layout and one unambiguous, enabled OK button.
 bool IsReady(const std::vector<Node>& nodes) {
     return !HasCredentialInput(nodes) &&
            CountControls(nodes, L"OkButton") == 1 &&
            std::any_of(nodes.begin(), nodes.end(), IsConfirmation) &&
            CountControls(nodes, L"BioFeedbackText", UIA_TextControlTypeId) == 1 &&
-           CountControls(nodes, L"CredentialsListV2", UIA_ListControlTypeId) == 1;
+           HasCredentialSelector(nodes);
 }
+
+struct DialogState {
+    std::optional<ULONGLONG> readySince;
+    bool handled = false;
+
+    // Each dialog has its own timer, independent of focus and other open dialogs.
+    bool ReadyLongEnough(ULONGLONG now, DWORD delay) {
+        if (!readySince) {
+            readySince = now;
+            return false;
+        }
+        return now - *readySince >= delay;
+    }
+
+    // A complete non-ready state starts a new confirmation cycle for this window.
+    void ResetReadiness() {
+        readySince.reset();
+        handled = false;
+    }
+};
 
 #ifndef HELLO_AUTO_OK_TEST
 constexpr DWORD kPollIntervalMs = 150;
@@ -169,6 +201,24 @@ bool IsBrokerWindow(HWND window) {
     std::wstring path = GetProcessPath(pid);
     return _wcsicmp(path.c_str(), nativeBrokerPath.c_str()) == 0 ||
            _wcsicmp(path.c_str(), wowBrokerPath.c_str()) == 0;
+}
+
+// Collects only visible credential-broker windows on the current desktop.
+BOOL CALLBACK CollectBrokerWindow(HWND window, LPARAM context) {
+    try {
+        if (IsBrokerWindow(window))
+            reinterpret_cast<std::vector<HWND>*>(context)->push_back(window);
+        return TRUE;
+    } catch (...) {
+        return FALSE;
+    }
+}
+
+// Enumerates Hello dialogs without consulting the requesting app or foreground window.
+std::vector<HWND> GetBrokerWindows() {
+    std::vector<HWND> windows;
+    if (!EnumWindows(CollectBrokerWindow, reinterpret_cast<LPARAM>(&windows))) return {};
+    return windows;
 }
 
 // Finds descendants within one dialog; a failed query yields an empty COM pointer.
@@ -250,14 +300,14 @@ void LoadSettings() {
     delayMs.store(static_cast<DWORD>(std::clamp(Wh_GetIntSetting(L"DelayMs"), 150, 3000)));
 }
 
-// Invokes the exact UIA control only while its dialog is still active and allowed.
+// Invokes the exact control while its broker dialog remains visible and allowed.
 bool InvokeConfirmation(HWND window, IUIAutomationElement* button) {
     ComPtr<IUIAutomationInvokePattern> invoke;
     if (FAILED(button->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&invoke)))) {
         ReportState(L"invoke-unavailable");
         return false;
     }
-    if (GetForegroundWindow() != window || !enabled.load()) return false;
+    if (!IsBrokerWindow(window) || !enabled.load()) return false;
 
     ReportState(L"invoking-confirmation");
     if (SUCCEEDED(invoke->Invoke())) return true;
@@ -279,69 +329,69 @@ bool RecordConfirmationResult(HWND window) {
 
 class DialogMonitor {
 public:
-    // Checks one foreground window. False means shutdown was requested while confirming.
+    // Checks every visible Hello dialog. False means shutdown was requested.
     bool Poll(IUIAutomation* automation) {
+        auto windows = GetBrokerWindows();
+        DiscardClosedDialogs(windows);
         if (!enabled.load()) {
-            ResetCandidate();
+            ResetCandidates();
             return true;
         }
-
-        HWND window = GetForegroundWindow();
-        if (!IsBrokerWindow(window)) {
-            ResetForOtherWindow();
-            return true;
+        for (HWND window : windows) {
+            if (!PollDialog(automation, window)) return false;
         }
-        if (window == handled_) return true;
-        if (!ReadReadyDialog(automation, window)) {
-            ResetCandidate();
-            return true;
-        }
-        if (!ReadyLongEnough(window)) return true;
-        return ConfirmIfStillReady(automation, window);
+        return true;
     }
 
-    // Discards elapsed readiness time after a pause, failed snapshot, or exception.
-    void ResetCandidate() { candidate_ = nullptr; }
+    // Discards timing after a pause or exception without repeating handled confirmations.
+    void ResetCandidates() {
+        for (auto& [window, state] : dialogs_) state.readySince.reset();
+    }
 
 private:
-    HWND candidate_ = nullptr;
-    HWND handled_ = nullptr;
-    ULONGLONG readySince_ = 0;
+    std::map<HWND, DialogState> dialogs_;
 
-    // A foreground change allows a later dialog to be handled, even if its HWND is reused.
-    void ResetForOtherWindow() {
-        ResetCandidate();
-        handled_ = nullptr;
+    // Forget hidden or destroyed dialogs so reused window handles get fresh state.
+    void DiscardClosedDialogs(const std::vector<HWND>& windows) {
+        std::erase_if(dialogs_, [&](const auto& entry) {
+            return std::find(windows.begin(), windows.end(), entry.first) == windows.end();
+        });
     }
 
-    // Starts timing a new candidate and waits for the configured stable period.
-    bool ReadyLongEnough(HWND window) {
-        if (candidate_ != window) {
-            candidate_ = window;
-            readySince_ = GetTickCount64();
-            return false;
+    // Advances one dialog's timer, preserving its handled state through transient UIA errors.
+    bool PollDialog(IUIAutomation* automation, HWND window) {
+        auto& state = dialogs_[window];
+        auto nodes = ReadDialog(automation, window);
+        if (!nodes) {
+            state.readySince.reset();
+            return true;
         }
-        return GetTickCount64() - readySince_ >= delayMs.load();
+        if (!IsReady(*nodes)) {
+            state.ResetReadiness();
+            return true;
+        }
+        if (state.handled || !state.ReadyLongEnough(GetTickCount64(), delayMs.load())) return true;
+        return ConfirmIfStillReady(automation, window, state);
     }
 
-    // Rechecks focus and readiness before marking this dialog handled and invoking OK.
-    bool ConfirmIfStillReady(IUIAutomation* automation, HWND window) {
+    // Rechecks the dialog itself before marking it handled and invoking its OK control.
+    bool ConfirmIfStillReady(IUIAutomation* automation, HWND window, DialogState& state) {
         auto nodes = GetCurrentReadyDialog(automation, window);
         if (!nodes) {
-            ResetCandidate();
+            state.readySince.reset();
             return true;
         }
 
         auto button = std::find_if(nodes->begin(), nodes->end(), IsConfirmation);
-        handled_ = window;
-        ResetCandidate();
+        state.handled = true;
+        state.readySince.reset();
         if (!InvokeConfirmation(window, button->element.Get())) return true;
         return RecordConfirmationResult(window);
     }
 
-    // Obtains the final snapshot only if the user has not switched windows or paused.
+    // Obtains the final ready snapshot unless automatic confirmation has been paused.
     std::optional<std::vector<Node>> GetCurrentReadyDialog(IUIAutomation* automation, HWND window) {
-        if (GetForegroundWindow() != window || !enabled.load()) return std::nullopt;
+        if (!enabled.load()) return std::nullopt;
         return ReadReadyDialog(automation, window);
     }
 };
@@ -361,7 +411,7 @@ void RunMonitor() {
         try {
             if (!monitor.Poll(automation.Get())) break;
         } catch (...) {
-            monitor.ResetCandidate();
+            monitor.ResetCandidates();
             ReportState(L"snapshot-error");
         }
     }

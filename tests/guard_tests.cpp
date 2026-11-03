@@ -14,9 +14,12 @@ std::vector<Node> ReadyDialog() {
 
 int main() {
     int count = 0, failures = 0;
-    auto check = [&](const char* name, const std::vector<Node>& nodes, bool expected) {
+    auto expect = [&](const char* name, bool passed) {
         ++count;
-        if (IsReady(nodes) != expected) { ++failures; std::cout << "FAIL: " << name << '\n'; }
+        if (!passed) { ++failures; std::cout << "FAIL: " << name << '\n'; }
+    };
+    auto check = [&](const char* name, const std::vector<Node>& nodes, bool expected) {
+        expect(name, IsReady(nodes) == expected);
     };
     auto nodes = ReadyDialog(); check("ready biometric confirmation", nodes, true);
     nodes = ReadyDialog(); nodes.pop_back(); check("recognition still running", nodes, false);
@@ -38,6 +41,23 @@ int main() {
     nodes = ReadyDialog(); edit.visible = true; edit.enabled = false; nodes.push_back(edit); check("disabled input", nodes, true);
     nodes = ReadyDialog(); Node unrelated; unrelated.automationId = L"CancelButton"; unrelated.type = UIA_ButtonControlTypeId; unrelated.enabled = true; nodes.push_back(unrelated); check("cancel button allowed", nodes, true);
     check("empty snapshot", {}, false);
+    nodes = ReadyDialog(); nodes[1].automationId = L"ChooseAnotherOption"; nodes[1].type = UIA_HyperlinkControlTypeId; check("collapsed sign-in options", nodes, true);
+    nodes.pop_back(); check("collapsed options before recognition", nodes, false);
+    nodes = ReadyDialog(); nodes[1].automationId = L"ChooseAnotherOption"; check("wrong collapsed selector type", nodes, false);
+    nodes = ReadyDialog(); Node options; options.automationId = L"ChooseAnotherOption"; options.type = UIA_HyperlinkControlTypeId; nodes.push_back(options); check("ambiguous selectors", nodes, false);
+    options.visible = false; nodes = ReadyDialog(); nodes.push_back(options); check("hidden alternative selector", nodes, true);
+    nodes = ReadyDialog(); nodes[1].automationId = L"ChooseAnotherOption"; nodes[1].type = UIA_HyperlinkControlTypeId; edit.enabled = true; nodes.push_back(edit); check("collapsed options with PIN entry", nodes, false);
+    HelloAutoOk::DialogState first, second;
+    expect("first dialog starts timing", !first.ReadyLongEnough(1000, 350));
+    expect("second dialog starts independently", !second.ReadyLongEnough(1100, 350));
+    expect("first dialog waits for its delay", !first.ReadyLongEnough(1349, 350));
+    expect("first dialog becomes ready", first.ReadyLongEnough(1350, 350));
+    expect("second dialog keeps its own delay", !second.ReadyLongEnough(1350, 350));
+    expect("second dialog becomes ready", second.ReadyLongEnough(1450, 350));
+    first.handled = true;
+    first.ResetReadiness();
+    expect("new confirmation cycle clears old state", !first.handled && !first.readySince);
+    expect("new cycle starts a fresh delay", !first.ReadyLongEnough(5000, 350));
     // The guard has no caption, locale, account or requesting-application fields.
     // All such values are therefore outside its input and cannot affect the result.
     std::cout << count << " checks; " << failures << " failures\n";

@@ -2,9 +2,13 @@
 
 A language-independent Windhawk tool mod that confirms the ready **OK** button in standard Windows Hello biometric dialogs across applications.
 
+![Animated preview](docs/preview.gif)
+
+*Illustrated demo using an English interface and the display name User.*
+
 ## How it works
 
-The mod looks only at a foreground window owned by the Windows copy of `CredentialUIBroker.exe`. It requires a visible `BioFeedbackText` text control, a `CredentialsListV2` list, and exactly one visible, enabled `OkButton` button. Any visible, enabled edit or password field prevents confirmation.
+The mod monitors visible dialog windows owned by the Windows copy of `CredentialUIBroker.exe`, independently of which application has focus. Each dialog has its own readiness timer. It requires a visible `BioFeedbackText` text control, one credential selector, and exactly one visible, enabled `OkButton` button. The selector can be the expanded `CredentialsListV2` list or the collapsed `ChooseAnotherOption` link. Any visible, enabled edit or password field prevents confirmation.
 
 The ready state must persist for the configured delay and is checked again immediately before invoking the button through UI Automation. No keyboard or mouse input is broadcast.
 
@@ -38,7 +42,7 @@ The source contains no account-specific defaults, personal paths, hostnames, sav
 
 This is an **experimental** release targeting the standard Windows Hello dialog. The structural guard is not a separate biometric-success API: Windows remains responsible for authentication, and the mod invokes a confirmation control exposed by that dialog.
 
-Automated tests cover ready, missing, hidden, disabled, ambiguous and credential-input states. Both x86 and x86-64 mod builds are supported for Windhawk 1.7.3. Automated guard tests and compilation do not replace interactive verification across Windows versions, applications and authentication providers. Such end-to-end compatibility is not claimed for this initial release.
+Automated tests cover ready, missing, hidden, disabled, ambiguous and credential-input states, both credential-selector layouts, and independent readiness timers for multiple dialogs. Both x86 and x86-64 mod builds are supported for Windhawk 1.7.3. Automated tests and compilation do not replace interactive verification across Windows versions, applications and authentication providers.
 
 Run the structural tests on Windows with CMake and a C++ compiler:
 
