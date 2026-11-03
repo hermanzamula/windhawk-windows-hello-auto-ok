@@ -56,8 +56,13 @@ int main() {
     expect("second dialog becomes ready", second.ReadyLongEnough(1450, 350));
     first.handled = true;
     first.ResetReadiness();
-    expect("new confirmation cycle clears old state", !first.handled && !first.readySince);
+    expect("rescan preserves one-invoke limit", first.handled && !first.readySince);
     expect("new cycle starts a fresh delay", !first.ReadyLongEnough(5000, 350));
+    second.ResetReadiness();
+    expect("lost focus discards pending delay", !second.readySince);
+    expect("refocus requires a fresh interval", !second.ReadyLongEnough(9000, 350));
+    expect("refocus cannot use old elapsed time", !second.ReadyLongEnough(9349, 350));
+    expect("refocus completes its own delay", second.ReadyLongEnough(9350, 350));
     // The guard has no caption, locale, account or requesting-application fields.
     // All such values are therefore outside its input and cannot affect the result.
     std::cout << count << " checks; " << failures << " failures\n";

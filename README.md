@@ -1,6 +1,6 @@
 # Windows Hello Auto OK for Windhawk
 
-A language-independent Windhawk tool mod that confirms the ready **OK** button in standard Windows Hello biometric dialogs across applications.
+A language-independent Windhawk mod that confirms the ready **OK** button in standard Windows Hello biometric dialogs across applications.
 
 ![Animated preview](docs/preview.gif)
 
@@ -8,7 +8,7 @@ A language-independent Windhawk tool mod that confirms the ready **OK** button i
 
 ## How it works
 
-The mod monitors visible dialog windows owned by the Windows copy of `CredentialUIBroker.exe`, independently of which application has focus. Each dialog has its own readiness timer. It requires a visible `BioFeedbackText` text control, one credential selector, and exactly one visible, enabled `OkButton` button. The selector can be the expanded `CredentialsListV2` list or the collapsed `ChooseAnotherOption` link. Any visible, enabled edit or password field prevents confirmation.
+The mod runs inside the Windows copy of `CredentialUIBroker.exe` and monitors only its active foreground dialog. Losing focus resets the readiness timer. A window is invoked at most once during its lifetime. It requires a visible `BioFeedbackText` text control, one credential selector, and exactly one visible, enabled `OkButton` button. The selector can be the expanded `CredentialsListV2` list or the collapsed `ChooseAnotherOption` link. Any visible, enabled edit or password field prevents confirmation.
 
 The ready state must persist for the configured delay and is checked again immediately before invoking the button through UI Automation. No keyboard or mouse input is broadcast.
 
@@ -21,9 +21,16 @@ This covers applications using the standard system dialog structure. It does not
 1. Open Windhawk and choose **Create a New Mod**.
 2. Replace the template with the complete contents of [windows-hello-auto-ok.wh.cpp](windows-hello-auto-ok.wh.cpp).
 3. Save, compile and enable the mod.
-4. Accept the Windows administrator consent prompt for the dedicated tool host when requested.
 
-The mod follows the [Windhawk tool-mod process model](https://github.com/ramensoftware/windhawk/wiki/Mods-as-tools:-Running-mods-in-a-dedicated-process). It targets Windhawk's own host process. It requests elevation because Windows protects credential dialogs from ordinary processes. If consent is declined, automatic confirmation remains inactive; toggle the mod off and on to retry. Elevation may be requested again after restarting the tool host or signing in to Windows.
+The mod targets `CredentialUIBroker.exe` directly. It has no custom launcher,
+requests no elevation, and creates no helper process. Windhawk must be able to
+load the mod into the Windows credential broker. An installation that excludes
+that process cannot run this mod.
+
+Window events wake the worker. It sleeps without a polling timer when no broker
+dialog is active, and checks readiness every 150 ms only while its dialog is
+active. UI Automation runs on a dedicated MTA thread and caches only structural
+properties. No credential text or biometric data is collected.
 
 The mod creates no scheduled tasks, installs no service, and has no dependency on a separate helper executable. Disable or remove it through Windhawk.
 
@@ -31,18 +38,24 @@ The mod creates no scheduled tasks, installs no service, and has no dependency o
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Enabled | true | Pause or resume automatic confirmation while the mod is loaded. |
-| DelayMs | 350 | Required stable readiness period; clamped to 150–3000 ms. |
+| DelayMs | 350 | Required stable readiness period; clamped to 150-3000 ms. |
 
 ## Privacy
 
-The source contains no account-specific defaults, personal paths, hostnames, saved credentials, or machine configuration. No account names, credential values, biometric data or interface text are read or logged. Windhawk local storage contains only a generic runtime state and a confirmation counter. The mod makes no network requests.
+The source contains no account-specific defaults, personal paths, hostnames, saved credentials, or machine configuration. No account names, credential values, biometric data or interface text are read or logged. No diagnostic state or confirmation counter is written to local storage. The mod makes no network requests.
+
+## Confirmation behavior
+
+This removes Windows Hello's manual confirmation step. A program requesting
+verification can be approved after Windows recognizes you while its Hello dialog
+is active. Background dialogs are never confirmed automatically. Windows still
+performs authentication, but enabling this mod removes the additional OK click.
 
 ## Validation and compatibility
 
 This is an **experimental** release targeting the standard Windows Hello dialog. The structural guard is not a separate biometric-success API: Windows remains responsible for authentication, and the mod invokes a confirmation control exposed by that dialog.
 
-Automated tests cover ready, missing, hidden, disabled, ambiguous and credential-input states, both credential-selector layouts, and independent readiness timers for multiple dialogs. Both x86 and x86-64 mod builds are supported for Windhawk 1.7.3. Automated tests and compilation do not replace interactive verification across Windows versions, applications and authentication providers.
+Automated tests cover ready, missing, hidden, disabled, ambiguous and credential-input states, both credential-selector layouts, focus-loss timing resets, and the per-window one-invoke limit. Both x86 and x86-64 mod builds compile with Windhawk 1.7.3. The in-process runtime was smoke-tested with facial recognition on Windows 11 26H2 x64 and Windhawk 1.7.3. Windhawk 2.0 and other providers have not been interactively tested. Automated tests and compilation do not replace interactive verification across Windows versions, applications and authentication providers.
 
 Run the structural tests on Windows with CMake and a C++ compiler:
 
