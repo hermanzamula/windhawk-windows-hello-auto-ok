@@ -3,7 +3,8 @@
 // @name            Windows Hello Auto OK
 // @description     Language-independent confirmation of ready Windows Hello biometric dialogs across applications.
 // @version         0.1.2
-// @author          Contributors
+// @author          hermanzamula
+// @github          https://github.com/hermanzamula
 // @include         windhawk.exe
 // @architecture    x86
 // @architecture    x86-64
